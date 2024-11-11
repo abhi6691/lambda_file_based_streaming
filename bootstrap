@@ -1,0 +1,128 @@
+#! /usr/bin/env python3.11
+
+import asyncio
+import os, sys, requests, json
+import threading
+import time
+from aws_lambda_powertools import Logger
+
+logger = Logger(service="bootstrap")
+
+# get the required environment variables
+AWS_LAMBDA_RUNTIME_API = os.getenv("AWS_LAMBDA_RUNTIME_API")
+LAMBDA_TASK_ROOT = os.getenv("LAMBDA_TASK_ROOT")
+
+# set the appropriate path for handler function
+sys.path.append(LAMBDA_TASK_ROOT)
+from lambda_handler import handler
+
+# URL templates
+INVOCATION_URL = "http://{}/2018-06-01/runtime/invocation/next"
+RESPONSE_URL_TEMPLATE = "http://{}/2018-06-01/runtime/invocation/{}/response"
+
+# Headers required for streaming
+HEADERS = {
+    "Lambda-Runtime-Function-Response-Mode": "streaming",
+    "Transfer-Encoding": "chunked"
+}
+
+# while True:
+#     logger.info(f"Entered bootstrap while loop")
+#     # invoke the lambda
+#     response = requests.get(INVOCATION_URL.format(AWS_LAMBDA_RUNTIME_API), stream=True)
+
+#     # get the event and invocation id
+#     event_data = json.loads(response.text)
+#     invocation_id = response.headers.get("Lambda-Runtime-Aws-Request-Id")
+
+#     # update the response url
+#     response_url = RESPONSE_URL_TEMPLATE.format(AWS_LAMBDA_RUNTIME_API, invocation_id)
+
+#     logger.info(f"Responding to invocation id: {invocation_id}, on url: {response_url}")
+#     # invoke the handler function and send the response
+#     requests.post(response_url, headers=HEADERS, data=handler(event_data, None))
+
+def create_file_with_initial_content(file_path):
+    """Creates a file with initial content for streaming testing purposes."""
+    with open(file_path, "w") as file:
+        file.write("Initial line 1\n")
+        file.write("Initial line 2\n")
+        file.write("Initial line 3\n")
+        file.flush()  # Ensure content is written immediately
+
+# def stream_file_contents(file_path, timeout=5):
+#     """Reads and streams the contents of a file line-by-line to response URL with a timeout."""
+#     with open(file_path, "r") as file:
+#         for line in file:
+#             logger.info(f"Streaming line: {line.strip()[:20]}...")
+#             yield line
+
+def stream_from_file(file_path):
+    """Yields content from file line-by-line until end-of-content marker is reached."""
+    last_pos = 0  # Track the last read position
+
+    while True:
+        with open(file_path, "r") as file:
+            file.seek(last_pos)  # Move to the last read position
+
+            while True:
+                current_pos = file.tell()  # Get current position before reading
+                line = file.readline()
+                if not line:
+                    break  # No more data to read
+
+                line = line.rstrip('\n')
+                if line == "END_OF_CONTENT":
+                    print("End-of-content marker detected. Stopping stream.")
+                    return  # Exit the generator to stop streaming
+
+                yield line + '\n'  # Yield the line with a newline character
+                last_pos = file.tell()  # Update last read position
+
+        # If no new lines, wait briefly before checking again
+        time.sleep(0.5)
+
+
+
+# def handle_response():
+#     file_path = f"/tmp/stream_{invocation_id}.txt"
+
+#     create_file_with_initial_content(file_path)
+
+#     for output in stream_file_contents(file_path):
+#         yield output
+
+async def invoke_handler(event_data, file_path):
+    await handler(event_data, None, file_path=file_path)
+
+while True:
+    # Poll for the next Lambda invocation
+    response = requests.get(INVOCATION_URL.format(AWS_LAMBDA_RUNTIME_API), stream=True)
+
+    # Get the event data and invocation ID
+    event_data = json.loads(response.text)
+    invocation_id = response.headers.get("Lambda-Runtime-Aws-Request-Id")
+
+    # Construct the response URL for the specific invocation
+    response_url = RESPONSE_URL_TEMPLATE.format(AWS_LAMBDA_RUNTIME_API, invocation_id)
+
+    # Handle response
+    # requests.post(response_url, headers=HEADERS, data=handle_response())
+    file_path = f"/tmp/stream_{invocation_id}.txt"
+    with open(file_path, "w") as file:
+        pass
+
+    handler_thread = threading.Thread(target=handler, args=(event_data, None, file_path,))
+    
+    # Start the handler and wait for it to finish generating content
+    handler_thread.start()
+
+    # Stream the response to the URL using a single HTTP connection
+    with requests.post(response_url, headers=HEADERS, data=stream_from_file(file_path)) as resp:
+        print(f"Streaming response status: {resp.status_code}")
+
+    # Wait for the handler thread to complete
+    handler_thread.join()
+
+    print("Both handler and streaming have completed.")
+

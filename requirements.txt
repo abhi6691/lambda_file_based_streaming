@@ -1,0 +1,6 @@
+langchain-openai
+langchain
+langgraph
+aws-lambda-powertools
+requests
+boto3
